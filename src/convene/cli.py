@@ -2,7 +2,9 @@
 
     convene events philly --since 2026-01-01
     convene events seattle --include-items --include-votes > seattle.json
-    convene matters chicago --since 2026-01-01 --include-sponsors
+    convene matters chicago --since 2026-01-01 --include-sponsors --include-history
+    convene memberships philly 2
+    convene events philly --since-modified 2026-05-10 --to philly.db
     convene people seattle
     convene bodies philly
     convene list
@@ -24,7 +26,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from convene.adapters import LegistarAdapter
+from convene import sqlite_sink
+from convene.adapters import GranicusAdapter, LegistarAdapter
+from convene.adapters.granicus import GranicusError
 from convene.adapters.legistar import LegistarError
 from convene.cache import build_client
 from convene.registry import Jurisdiction, jurisdictions
@@ -40,7 +44,7 @@ console = Console()
 err = Console(stderr=True)
 
 
-# ----- shared option wrappers (keeps typer's noisy syntax out of the commands)
+# ----- shared option wrappers
 
 def _slug_arg():
     return typer.Argument(..., help="City slug (run `convene list`)")
@@ -55,7 +59,7 @@ def _token_opt():
 
 
 def _output_opt():
-    return typer.Option(None, "-o", "--output", help="Write to file instead of stdout")
+    return typer.Option(None, "-o", "--output", help="Write JSON to a file instead of stdout")
 
 
 def _format_opt():
@@ -65,8 +69,19 @@ def _format_opt():
 
 def _cache_opt():
     return typer.Option(False, "--cache",
-                        help="Cache GET responses on disk at ~/.cache/convene/ "
-                             "(safe for read-only data; delete the dir to refresh)")
+                        help="Cache GET responses on disk at ~/.cache/convene/")
+
+
+def _db_opt():
+    return typer.Option(None, "--to",
+                        help="Append records to a SQLite database at PATH "
+                             "(creates one if it doesn't exist)")
+
+
+def _since_mod_opt():
+    return typer.Option(None, "--since-modified",
+                        help="Pull only records modified after this UTC datetime "
+                             "(for incremental sync)")
 
 
 # ----- commands
@@ -94,28 +109,45 @@ def cmd_events(
     slug: str = _slug_arg(),
     since: datetime | None = typer.Option(None, "--since", help="ISO date floor (EventDate)"),
     until: datetime | None = typer.Option(None, "--until", help="ISO date ceiling (EventDate)"),
+    since_modified: datetime | None = _since_mod_opt(),
     include_items: bool = typer.Option(False, "--include-items",
-                                       help="Fetch agenda items per event (slow)"),
+                                       help="Fetch agenda items per event (Legistar only)"),
     include_votes: bool = typer.Option(False, "--include-votes",
-                                       help="Also fetch roll-call votes (implies --include-items)"),
+                                       help="Roll-call votes (Legistar, implies --include-items)"),
     limit: int | None = typer.Option(None, "--limit", help="Stop after N events"),
     token: str | None = _token_opt(),
     output: Path | None = _output_opt(),
     fmt: str = _format_opt(),
     cache: bool = _cache_opt(),
+    db: Path | None = _db_opt(),
 ) -> None:
-    """Stream meetings for a jurisdiction as JSON."""
+    """Stream meetings for a jurisdiction."""
     j = _lookup(slug)
     if include_votes:
         include_items = True
+
+    if j.platform == "granicus":
+        if include_items or include_votes or since_modified or token:
+            err.print("[yellow]warning: --include-items / --include-votes / "
+                      "--since-modified / --token are Legistar-only and will be ignored "
+                      f"for granicus jurisdiction {slug!r}[/yellow]")
+        with GranicusAdapter(j, client=build_client(cache=cache)) as adapter:
+            events = adapter.events(
+                since=since.date() if since else None,
+                until=until.date() if until else None,
+            )
+            _emit(_limit(events, limit), output, fmt, db, sqlite_sink.insert_events)
+        return
+
     with LegistarAdapter(j, token=token, client=build_client(cache=cache)) as adapter:
         events = adapter.events(
             since=since.date() if since else None,
             until=until.date() if until else None,
+            since_modified=since_modified,
             include_items=include_items,
             include_votes=include_votes,
         )
-        _stream(_limit(events, limit), output, fmt)
+        _emit(_limit(events, limit), output, fmt, db, sqlite_sink.insert_events)
 
 
 @app.command("people")
@@ -125,11 +157,13 @@ def cmd_people(
     output: Path | None = _output_opt(),
     fmt: str = _format_opt(),
     cache: bool = _cache_opt(),
+    db: Path | None = _db_opt(),
 ) -> None:
     """List council members and other tracked people."""
     j = _lookup(slug)
+    _require_legistar(j, "people")
     with LegistarAdapter(j, token=token, client=build_client(cache=cache)) as adapter:
-        _stream(adapter.people(), output, fmt)
+        _emit(adapter.people(), output, fmt, db, sqlite_sink.insert_people)
 
 
 @app.command("bodies")
@@ -139,11 +173,13 @@ def cmd_bodies(
     output: Path | None = _output_opt(),
     fmt: str = _format_opt(),
     cache: bool = _cache_opt(),
+    db: Path | None = _db_opt(),
 ) -> None:
     """List councils, committees, and departments."""
     j = _lookup(slug)
+    _require_legistar(j, "bodies")
     with LegistarAdapter(j, token=token, client=build_client(cache=cache)) as adapter:
-        _stream(adapter.organizations(), output, fmt)
+        _emit(adapter.organizations(), output, fmt, db, sqlite_sink.insert_organizations)
 
 
 @app.command("matters")
@@ -153,23 +189,47 @@ def cmd_matters(
                                           help="ISO date floor (MatterIntroDate)"),
     until: datetime | None = typer.Option(None, "--until",
                                           help="ISO date ceiling (MatterIntroDate)"),
+    since_modified: datetime | None = _since_mod_opt(),
     include_sponsors: bool = typer.Option(False, "--include-sponsors",
                                           help="Fetch sponsors per matter (slow)"),
+    include_history: bool = typer.Option(False, "--include-history",
+                                         help="Fetch the full action history per matter (slow)"),
     limit: int | None = typer.Option(None, "--limit", help="Stop after N matters"),
     token: str | None = _token_opt(),
     output: Path | None = _output_opt(),
     fmt: str = _format_opt(),
     cache: bool = _cache_opt(),
+    db: Path | None = _db_opt(),
 ) -> None:
-    """Stream legislation (bills, resolutions, communications) as JSON."""
+    """Stream legislation (bills, resolutions, communications)."""
     j = _lookup(slug)
+    _require_legistar(j, "matters")
     with LegistarAdapter(j, token=token, client=build_client(cache=cache)) as adapter:
         matters = adapter.matters(
             since=since.date() if since else None,
             until=until.date() if until else None,
+            since_modified=since_modified,
             include_sponsors=include_sponsors,
+            include_history=include_history,
         )
-        _stream(_limit(matters, limit), output, fmt)
+        _emit(_limit(matters, limit), output, fmt, db, sqlite_sink.insert_matters)
+
+
+@app.command("memberships")
+def cmd_memberships(
+    slug: str = _slug_arg(),
+    person_id: int = typer.Argument(..., help="Legistar PersonId (numeric, from `convene people`)"),
+    token: str | None = _token_opt(),
+    output: Path | None = _output_opt(),
+    fmt: str = _format_opt(),
+    cache: bool = _cache_opt(),
+    db: Path | None = _db_opt(),
+) -> None:
+    """List a person's seats on councils and committees."""
+    j = _lookup(slug)
+    _require_legistar(j, "memberships")
+    with LegistarAdapter(j, token=token, client=build_client(cache=cache)) as adapter:
+        _emit(adapter.memberships(person_id), output, fmt, db, sqlite_sink.insert_memberships)
 
 
 # ----- internals
@@ -182,17 +242,36 @@ def _lookup(slug: str) -> Jurisdiction:
         raise typer.Exit(code=2) from None
 
 
+def _require_legistar(j: Jurisdiction, action: str) -> None:
+    if j.platform != "legistar":
+        err.print(f"[red]{action} is Legistar-only; {j.slug} is on {j.platform}.[/red]")
+        raise typer.Exit(code=2)
+
+
 def _limit(it: Iterable, n: int | None) -> Iterable:
     if n is None:
         return it
     return (x for i, x in enumerate(it) if i < n)
 
 
-def _stream(records: Iterable, output: Path | None, fmt: str) -> None:
-    if fmt not in {"json", "ndjson"}:
-        err.print(f"[red]unknown --format {fmt!r}; use 'json' or 'ndjson'[/red]")
-        raise typer.Exit(code=2)
+def _emit(records: Iterable, output: Path | None, fmt: str,
+          db: Path | None, db_inserter) -> None:
+    """Tee records to one or more sinks (stdout/file as JSON, and/or SQLite)."""
     try:
+        if db:
+            conn = sqlite_sink.connect(db)
+            records = list(records)  # materialize so we can hand the same list to both
+            n = db_inserter(conn, iter(records))
+            conn.close()
+            err.print(f"[green]wrote {n} records to {db}[/green]")
+            if output is None and fmt == "json":
+                # If they only asked for SQLite, don't dump JSON too.
+                return
+
+        if fmt not in {"json", "ndjson"}:
+            err.print(f"[red]unknown --format {fmt!r}; use 'json' or 'ndjson'[/red]")
+            raise typer.Exit(code=2)
+
         out = output.open("w") if output else sys.stdout
         try:
             count = 0
@@ -210,7 +289,7 @@ def _stream(records: Iterable, output: Path | None, fmt: str) -> None:
                 out.close()
         if output:
             err.print(f"[green]wrote {count} records to {output}[/green]")
-    except LegistarError as exc:
+    except (LegistarError, GranicusError) as exc:
         err.print(f"[red]{exc}[/red]")
         msg = str(exc)
         if ("401" in msg or "403" in msg) and not os.environ.get("CONVENE_TOKEN"):

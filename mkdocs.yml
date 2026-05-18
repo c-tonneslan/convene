@@ -1,0 +1,50 @@
+site_name: convene
+site_description: Pull municipal meeting data from Legistar and Granicus into one normalized JSON shape
+site_url: https://c-tonneslan.github.io/convene/
+repo_url: https://github.com/c-tonneslan/convene
+repo_name: c-tonneslan/convene
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - content.code.annotate
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Adding a city: adding_a_city.md
+  - Adapters:
+    - Writing an adapter: writing_an_adapter.md
+  - Recipes:
+    - Daily snapshot via GitHub Actions: recipes/github_action.md
+    - Building a local SQLite database: recipes/sqlite.md
+    - Incremental sync: recipes/sync.md
+  - Reference:
+    - CLI: reference/cli.md
+    - Python API: reference/api.md
+  - Changelog: changelog.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true

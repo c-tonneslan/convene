@@ -1,0 +1,76 @@
+name: convene snapshot
+description: Pull one or more municipal jurisdictions and write JSON snapshots into a directory
+author: Charlie Tonneslan
+
+inputs:
+  jurisdictions:
+    description: "Comma-separated slugs (e.g. 'philly,seattle,nashville')"
+    required: true
+  since-days:
+    description: "How many days of events/matters to pull"
+    default: "30"
+  out-dir:
+    description: "Where to write the JSON files"
+    default: "snapshots/"
+  include:
+    description: "Comma-separated list of collections to snapshot. One of events, matters, people, bodies."
+    default: "events,matters,people,bodies"
+  python-version:
+    description: "Python interpreter to use"
+    default: "3.13"
+  convene-version:
+    description: "Version specifier for convene (e.g. '==0.4.0' or '@main')"
+    default: ""
+  token:
+    description: "Legistar API token (only required for NYC)"
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: pip
+    - name: install convene
+      shell: bash
+      run: |
+        spec="convene${{ inputs.convene-version }}"
+        if [[ "$spec" == convene@* ]]; then
+          ref="${spec#convene@}"
+          pip install "git+https://github.com/c-tonneslan/convene@${ref}"
+        else
+          pip install "$spec"
+        fi
+    - name: snapshot
+      shell: bash
+      env:
+        CONVENE_TOKEN: ${{ inputs.token }}
+      run: |
+        mkdir -p "${{ inputs.out-dir }}"
+        since=$(python -c "from datetime import datetime, timedelta; print((datetime.utcnow() - timedelta(days=${{ inputs.since-days }})).strftime('%Y-%m-%d'))")
+        IFS=',' read -ra slugs <<< "${{ inputs.jurisdictions }}"
+        IFS=',' read -ra includes <<< "${{ inputs.include }}"
+        for slug in "${slugs[@]}"; do
+          slug=$(echo "$slug" | xargs)
+          for what in "${includes[@]}"; do
+            what=$(echo "$what" | xargs)
+            case "$what" in
+              events)
+                convene events "$slug" --since "$since" -o "${{ inputs.out-dir }}/${slug}_events.json" || echo "skipped $slug events"
+                ;;
+              matters)
+                convene matters "$slug" --since "$since" -o "${{ inputs.out-dir }}/${slug}_matters.json" || echo "skipped $slug matters"
+                ;;
+              people)
+                convene people "$slug" -o "${{ inputs.out-dir }}/${slug}_people.json" || echo "skipped $slug people"
+                ;;
+              bodies)
+                convene bodies "$slug" -o "${{ inputs.out-dir }}/${slug}_bodies.json" || echo "skipped $slug bodies"
+                ;;
+              *)
+                echo "unknown include: $what" >&2
+                ;;
+            esac
+          done
+        done

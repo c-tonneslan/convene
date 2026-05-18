@@ -86,6 +86,20 @@ class Event(BaseModel):
     sources: list[Source] = Field(default_factory=list)
 
 
+class MatterAction(BaseModel):
+    """A single recorded action on a piece of legislation."""
+
+    date: datetime
+    action: str
+    action_text: str | None = None
+    body: str | None = None
+    event_id: str | None = None  # ocd-event ID, joinable against Event.id
+    mover: str | None = None
+    seconder: str | None = None
+    tally: str | None = None
+    passed: bool | None = None
+
+
 class Matter(BaseModel):
     """A piece of legislation, resolution, or other tracked item."""
 
@@ -97,4 +111,16 @@ class Matter(BaseModel):
     status: str | None = None
     introduced_date: date | None = None
     sponsors: list[str] = Field(default_factory=list)
+    actions: list[MatterAction] = Field(default_factory=list)
     sources: list[Source] = Field(default_factory=list)
+
+
+class Membership(BaseModel):
+    """A person's seat on a body, with optional date range."""
+
+    person_id: str
+    person_name: str
+    organization_name: str
+    role: str | None = None        # "Member", "Chair", "Vice Chair", ...
+    start_date: date | None = None
+    end_date: date | None = None

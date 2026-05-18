@@ -1,19 +1,19 @@
 # convene
 
 Pull municipal meeting data from city government portals into one normalized
-JSON shape. Built on the official Legistar Web API (not HTML scraping), with
-support for adding a new city in one config entry.
+JSON shape. Built on the official Legistar Web API plus a Granicus HTML
+scraper. Adding a new city is a one-line registry entry.
 
 Most US cities run their council meeting portals on Legistar (a Granicus
-product). Legistar publishes a real REST/OData API at `webapi.legistar.com`,
-but most existing libraries either ignore the API and scrape HTML or wrap it
-in heavy Django/Mongo orchestration. convene is the simple thing in the
-middle: hit the API, normalize the response, output JSON.
-
-The output shape is loosely modeled on
-[Open Civic Data](https://opencivicdata.readthedocs.io/), so it slots into
-Councilmatic-style ingest scripts and other civic-tech tooling without much
+product) or Granicus's other tools. Legistar publishes a real REST/OData API
+at `webapi.legistar.com`. Granicus's older "ViewPublisher" pages have no API
+but a consistent DOM. convene uses the Legistar API directly and scrapes
+Granicus's HTML. Output is OCD-shaped JSON (loosely modeled on
+[Open Civic Data](https://opencivicdata.readthedocs.io/)) so downstream tools
+like [Councilmatic](https://www.councilmatic.org/) can ingest it with minimal
 remapping.
+
+Full docs at [c-tonneslan.github.io/convene](https://c-tonneslan.github.io/convene/).
 
 ## Install
 
@@ -50,17 +50,30 @@ other cities actually publish these):
 $ convene events seattle --since 2026-05-01 --include-votes --limit 10
 ```
 
-Pull recent legislation with sponsors:
+Pull recent legislation with sponsors and the full action history:
 
 ```
-$ convene matters chicago --since 2026-01-01 --include-sponsors
+$ convene matters chicago --since 2026-01-01 --include-sponsors --include-history
 ```
 
-List council members and committees:
+Which committees has a person sat on? (PersonId comes from `convene people`)
 
 ```
-$ convene people philly
-$ convene bodies philly
+$ convene memberships philly 2
+```
+
+Pull only what's changed since yesterday (for incremental sync):
+
+```
+$ convene events philly --since-modified $(date -u -v-1d +%Y-%m-%dT%H:%M:%S)
+```
+
+Build a queryable local SQLite database:
+
+```
+$ convene events philly  --since 2026-01-01 --include-items   --to philly.db
+$ convene matters philly --since 2026-01-01 --include-history --to philly.db
+$ sqlite3 philly.db 'SELECT name, start_date FROM events LIMIT 5;'
 ```
 
 Stream large pulls as newline-delimited JSON so jq and friends can chew on
@@ -144,8 +157,9 @@ Every model is a pydantic `BaseModel`, so `event.model_dump_json()` and
 
 ## Cities preconfigured
 
-20 cities, all smoke-tested against the live API. Each entry is a one-line
-`Jurisdiction` in [`src/convene/registry.py`](src/convene/registry.py):
+24 cities (20 Legistar + 4 Granicus), all smoke-tested against the live API.
+Each entry is a one-line `Jurisdiction` in
+[`src/convene/registry.py`](src/convene/registry.py):
 
 | slug | city | notes |
 |---|---|---|
@@ -169,6 +183,10 @@ Every model is a pydantic `BaseModel`, so `event.model_dump_json()` and
 | sanjose | San Jose, CA | |
 | seattle | Seattle, WA | publishes roll-call votes |
 | sf | San Francisco, CA | bodies/persons/matters only (the tenant's Legistar config rejects /events) |
+| duluth | Duluth, MN | Granicus; events only |
+| neworleans | New Orleans, LA | Granicus; events only |
+| scranton | Scranton, PA | Granicus; events only |
+| stpaul | Saint Paul, MN | Granicus; events only |
 
 NYC requires a free API token. Get one from
 [council.nyc.gov/legislation/api/](https://council.nyc.gov/legislation/api/),
@@ -180,17 +198,26 @@ To add a new city see [docs/adding_a_city.md](docs/adding_a_city.md).
 
 |  | convene | python-legistar-scraper | pupa |
 |---|---|---|---|
-| Source | Official REST/OData API | HTML scraping | Pluggable, mostly HTML |
-| Breaks when Granicus tweaks the UI | no | yes | depends |
-| Output | OCD-shaped JSON | Python dicts | Pushes to Postgres/Mongo |
-| Dependencies | httpx, pydantic, typer | requests, lxml, scrapelib | Django, Mongo, scrapelib, ... |
+| Legistar source | Official REST/OData API | HTML scraping | Pluggable, mostly HTML |
+| Granicus support | Yes (HTML scraper) | No | Per-city scrapers |
+| Output | OCD-shaped JSON / SQLite | Python dicts | Pushes to Postgres/Mongo |
+| Dependencies | httpx, pydantic, typer, bs4 | requests, lxml, scrapelib | Django, Mongo, scrapelib, ... |
 | Adding a city | one config entry | a Python class per city | a Python class + pupa wiring |
 | Modern Python | 3.11+ | 3.6+, Py2 legacy code | 3.x with Py2 lineage |
-| Votes | yes | partial | depends on per-city scraper |
-| Matters | yes | partial | yes |
+| Votes | yes (Seattle, others) | partial | depends on per-city scraper |
+| Matters + history | yes | partial | yes |
+| Incremental sync | yes (`--since-modified`) | no | yes |
 
 convene is what python-legistar-scraper would look like if it started over
 today and trusted the official API.
+
+## Snapshot via GitHub Actions
+
+There's a reusable composite action at
+[`.github/actions/snapshot`](.github/actions/snapshot/action.yml) that pulls
+one or more cities and writes JSON snapshots into a directory. Schedule it
+nightly and you get a public, git-versioned archive of your city's meetings.
+See [docs/recipes/github_action.md](docs/recipes/github_action.md).
 
 ## Development
 
@@ -198,9 +225,10 @@ today and trusted the official API.
 git clone https://github.com/c-tonneslan/convene
 cd convene
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,docs]"
 pytest
 ruff check .
+mkdocs serve   # docs at http://127.0.0.1:8000
 ```
 
 Tests run against frozen fixtures of real API responses through an

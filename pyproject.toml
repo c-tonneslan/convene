@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "convene"
-version = "0.1.0"
+version = "0.4.0"
 description = "Pull municipal meeting data from Legistar and friends into one normalized JSON shape."
 readme = "README.md"
 license = { text = "MIT" }
@@ -26,6 +26,7 @@ dependencies = [
     "pydantic >= 2.6",
     "typer >= 0.12",
     "rich >= 13.7",
+    "beautifulsoup4 >= 4.12",
 ]
 
 [project.optional-dependencies]
@@ -34,13 +35,18 @@ dev = [
     "pytest-httpx >= 0.30",
     "ruff >= 0.4",
 ]
+docs = [
+    "mkdocs-material >= 9.5",
+]
 
 [project.scripts]
 convene = "convene.cli:app"
 
 [project.urls]
+Documentation = "https://c-tonneslan.github.io/convene/"
 Source = "https://github.com/c-tonneslan/convene"
 Issues = "https://github.com/c-tonneslan/convene/issues"
+Changelog = "https://github.com/c-tonneslan/convene/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/convene"]

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Platform = Literal["legistar"]  # granicus, civicclerk to come
+Platform = Literal["legistar", "granicus"]
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class Jurisdiction:
     portal_url: str       # the public-facing portal
     needs_token: bool = False  # NYC requires a free API token; most don't
     skip_endpoints: tuple[str, ...] = field(default_factory=tuple)
+    view_ids: tuple[int, ...] = field(default_factory=tuple)  # Granicus only
     note: str = ""
 
 
@@ -82,6 +83,25 @@ _JURISDICTIONS: dict[str, Jurisdiction] = {
                      note="NYC gates the Web API behind a free API token. "
                           "Request one at council.nyc.gov/legislation/api/, then "
                           "pass --token or set CONVENE_TOKEN."),
+        # ---- Granicus (HTML-scraped). Each city specifies one or more view_ids.
+        # view_id is the council/committee picker on a Granicus portal; you can
+        # see it in the URL of the meetings page.
+        Jurisdiction("stpaul", "Saint Paul, MN", "granicus", "stpaul",
+                     "https://stpaul.granicus.com",
+                     view_ids=(37,),
+                     note="HTML-scraped; events only, no matters/votes."),
+        Jurisdiction("scranton", "Scranton, PA", "granicus", "scrantonpa",
+                     "https://scrantonpa.granicus.com",
+                     view_ids=(2,),
+                     note="HTML-scraped; events only."),
+        Jurisdiction("duluth", "Duluth, MN", "granicus", "duluth-mn",
+                     "https://duluth-mn.granicus.com",
+                     view_ids=(15,),
+                     note="HTML-scraped; events only."),
+        Jurisdiction("neworleans", "New Orleans, LA", "granicus", "cityofno",
+                     "https://cityofno.granicus.com",
+                     view_ids=(42,),
+                     note="HTML-scraped; events only."),
     ]
 }
 

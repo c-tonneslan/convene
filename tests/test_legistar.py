@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import httpx
@@ -105,6 +105,25 @@ def test_events_with_items(philly, mock_transport):
     typed = [i for i in e.items if i.matter_type]
     assert typed
     assert typed[0].matter_type in {"Bill", "Resolution", "Communication"}
+
+
+def test_events_since_modified_filter(philly, mock_transport):
+    """`--since-modified` should add an EventLastModifiedUtc filter."""
+    routes, _, _, transport = mock_transport
+    expected_url = (
+        "https://webapi.legistar.com/v1/phila/events"
+        "?%24orderby=EventDate+desc"
+        "&%24filter=EventLastModifiedUtc+ge+datetime%272026-05-10T00%3A00%3A00%27"
+        "&%24top=1000&%24skip=0"
+    )
+    routes["GET", expected_url] = _load("phila_events.json")
+
+    with httpx.Client(transport=transport) as http:
+        adapter = LegistarAdapter(philly, client=http)
+        events = list(adapter.events(since_modified=datetime(2026, 5, 10)))
+
+    # If the filter URL was constructed differently, mock_transport returns []
+    assert events, "since_modified didn't construct the expected URL"
 
 
 def test_events_with_votes(seattle, mock_transport):
@@ -240,6 +259,46 @@ def test_matters_with_sponsors(philly, mock_transport):
     assert m.sponsors
     fixture = _load("phila_matter_27257_sponsors.json")
     assert len(m.sponsors) == len(fixture)
+
+
+def test_matters_with_history(philly, mock_transport):
+    routes, _, _, transport = mock_transport
+    routes[
+        "GET",
+        "https://webapi.legistar.com/v1/phila/matters?%24orderby=MatterIntroDate+desc&%24top=1000&%24skip=0"
+    ] = _load("phila_matters.json")
+    routes[
+        "GET",
+        "https://webapi.legistar.com/v1/phila/matters/27257/histories"
+    ] = _load("phila_matter_27257_histories.json")
+
+    with httpx.Client(transport=transport) as http:
+        matters = list(LegistarAdapter(philly, client=http).matters(include_history=True))
+
+    assert len(matters) == 1
+    m = matters[0]
+    assert m.actions
+    action = m.actions[0]
+    assert action.action  # e.g. "Introduced and Referred"
+    assert action.body  # the originating body
+    assert action.event_id and action.event_id.startswith("ocd-event/phila-")
+
+
+def test_memberships(philly, mock_transport):
+    routes, _, _, transport = mock_transport
+    routes[
+        "GET",
+        "https://webapi.legistar.com/v1/phila/persons/2/officerecords"
+    ] = _load("phila_person_2_officerecords.json")
+
+    with httpx.Client(transport=transport) as http:
+        memberships = list(LegistarAdapter(philly, client=http).memberships(2))
+
+    assert memberships
+    m = memberships[0]
+    assert m.person_id == "ocd-person/phila-2"
+    assert m.organization_name
+    assert m.start_date  # the fixture entries all have date ranges
 
 
 # ----- error handling

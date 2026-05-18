@@ -1,6 +1,15 @@
 """Pull municipal meeting data from Legistar and friends into one normalized JSON shape."""
 
-from convene.models import Event, EventItem, Matter, Organization, Person, Vote
+from convene.models import (
+    Event,
+    EventItem,
+    Matter,
+    MatterAction,
+    Membership,
+    Organization,
+    Person,
+    Vote,
+)
 from convene.registry import Jurisdiction, get, jurisdictions
 
 __all__ = [
@@ -8,6 +17,8 @@ __all__ = [
     "EventItem",
     "Jurisdiction",
     "Matter",
+    "MatterAction",
+    "Membership",
     "Organization",
     "Person",
     "Vote",
@@ -15,4 +26,4 @@ __all__ = [
     "jurisdictions",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.4.0"

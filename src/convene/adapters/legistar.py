@@ -20,6 +20,8 @@ from convene.models import (
     Event,
     EventItem,
     Matter,
+    MatterAction,
+    Membership,
     Organization,
     Person,
     Source,
@@ -63,8 +65,12 @@ class LegistarAdapter:
     # ------------------------------------------------------------------ events
 
     def events(self, *, since: date | None = None, until: date | None = None,
+               since_modified: datetime | None = None,
                include_items: bool = False, include_votes: bool = False) -> Iterator[Event]:
         """Yield meetings, newest first.
+
+        `since` / `until` filter on EventDate; `since_modified` filters on
+        EventLastModifiedUtc and is what you want for incremental sync.
 
         `include_items` triggers one extra request per event (the bulk events
         endpoint returns empty EventItems lists, so this is the only way to get
@@ -81,6 +87,10 @@ class LegistarAdapter:
             filters.append(f"EventDate ge datetime'{since.isoformat()}'")
         if until:
             filters.append(f"EventDate le datetime'{until.isoformat()}'")
+        if since_modified:
+            filters.append(
+                f"EventLastModifiedUtc ge datetime'{since_modified.isoformat()}'"
+            )
         params = {"$orderby": "EventDate desc"}
         if filters:
             params["$filter"] = " and ".join(filters)
@@ -171,26 +181,38 @@ class LegistarAdapter:
     # ----------------------------------------------------------------- matters
 
     def matters(self, *, since: date | None = None, until: date | None = None,
-                include_sponsors: bool = False) -> Iterator[Matter]:
+                since_modified: datetime | None = None,
+                include_sponsors: bool = False, include_history: bool = False) -> Iterator[Matter]:
         """Yield legislation items (bills, resolutions, etc.).
 
-        `since` / `until` filter on MatterIntroDate. `include_sponsors` does one
-        extra request per matter to pull the sponsor list.
+        `since` / `until` filter on MatterIntroDate; `since_modified` filters
+        on MatterLastModifiedUtc and is what you want for incremental sync.
+
+        `include_sponsors` does one extra request per matter to pull the
+        sponsor list. `include_history` adds another request to pull the full
+        action history.
         """
         filters = []
         if since:
             filters.append(f"MatterIntroDate ge datetime'{since.isoformat()}'")
         if until:
             filters.append(f"MatterIntroDate le datetime'{until.isoformat()}'")
+        if since_modified:
+            filters.append(
+                f"MatterLastModifiedUtc ge datetime'{since_modified.isoformat()}'"
+            )
         params = {"$orderby": "MatterIntroDate desc"}
         if filters:
             params["$filter"] = " and ".join(filters)
 
         for raw in self._paginate("matters", params):
             sponsors: list[str] = []
+            actions: list[MatterAction] = []
             if include_sponsors:
                 sponsors = list(self._matter_sponsors(raw["MatterId"]))
-            yield self._matter_from_raw(raw, sponsors)
+            if include_history:
+                actions = list(self._matter_history(raw["MatterId"]))
+            yield self._matter_from_raw(raw, sponsors, actions)
 
     def _matter_sponsors(self, matter_id: int) -> Iterator[str]:
         url = f"{BASE}/{self.j.client}/matters/{matter_id}/sponsors"
@@ -200,7 +222,28 @@ class LegistarAdapter:
             if name:
                 yield name
 
-    def _matter_from_raw(self, raw: dict[str, Any], sponsors: list[str]) -> Matter:
+    def _matter_history(self, matter_id: int) -> Iterator[MatterAction]:
+        url = f"{BASE}/{self.j.client}/matters/{matter_id}/histories"
+        for raw in self._get(url, {}):
+            action_date_raw = raw.get("MatterHistoryActionDate")
+            if not action_date_raw:
+                continue
+            event_id = raw.get("MatterHistoryEventId")
+            yield MatterAction(
+                date=datetime.fromisoformat(action_date_raw),
+                action=raw.get("MatterHistoryActionName") or "",
+                action_text=raw.get("MatterHistoryActionText"),
+                body=raw.get("MatterHistoryActionBodyName"),
+                event_id=(f"ocd-event/{self.j.client}-{event_id}"
+                          if event_id else None),
+                mover=raw.get("MatterHistoryMoverName"),
+                seconder=raw.get("MatterHistorySeconderName"),
+                tally=raw.get("MatterHistoryTally"),
+                passed=_passed_flag(raw.get("MatterHistoryPassedFlagName")),
+            )
+
+    def _matter_from_raw(self, raw: dict[str, Any], sponsors: list[str],
+                         actions: list[MatterAction]) -> Matter:
         intro = raw.get("MatterIntroDate")
         intro_date = _parse_date(intro) if intro else None
         return Matter(
@@ -212,8 +255,28 @@ class LegistarAdapter:
             status=raw.get("MatterStatusName"),
             introduced_date=intro_date,
             sponsors=sponsors,
+            actions=actions,
             sources=[Source(url=self.j.portal_url)],
         )
+
+    # ------------------------------------------------------------- memberships
+
+    def memberships(self, person_id: int) -> Iterator[Membership]:
+        """Yield the committee/body seats a person has held."""
+        url = f"{BASE}/{self.j.client}/persons/{person_id}/officerecords"
+        for raw in self._get(url, {}):
+            start_date = _parse_date(raw["OfficeRecordStartDate"]) if raw.get(
+                "OfficeRecordStartDate") else None
+            end_date = _parse_date(raw["OfficeRecordEndDate"]) if raw.get(
+                "OfficeRecordEndDate") else None
+            yield Membership(
+                person_id=f"ocd-person/{self.j.client}-{raw['OfficeRecordPersonId']}",
+                person_name=raw.get("OfficeRecordFullName") or "",
+                organization_name=raw.get("OfficeRecordBodyName") or "",
+                role=raw.get("OfficeRecordTitle") or raw.get("OfficeRecordMemberType"),
+                start_date=start_date,
+                end_date=end_date,
+            )
 
     # --------------------------------------------------------------- internals
 
@@ -306,6 +369,17 @@ def _body_classification(body_type: str | None) -> str | None:
         return "legislature"
     if "department" in t or "office" in t:
         return "department"
+    return None
+
+
+def _passed_flag(value: str | None) -> bool | None:
+    if not value:
+        return None
+    v = value.strip().lower()
+    if v in {"pass", "passed", "true", "yes"}:
+        return True
+    if v in {"fail", "failed", "false", "no"}:
+        return False
     return None
 
 
