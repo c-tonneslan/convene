@@ -1,8 +1,8 @@
 """Adapter for the Legistar Web API.
 
-Legistar (Granicus product) powers most US municipal meeting portals: Philly,
-NYC, Chicago, Seattle, plus a few hundred others. They publish a real REST/OData
-API at webapi.legistar.com, but most existing scrapers ignore it and scrape the
+Legistar (a Granicus product) powers most US municipal meeting portals: Philly,
+Chicago, Seattle, and a few hundred others. They publish a real REST/OData API
+at webapi.legistar.com, but most existing scrapers ignore it and scrape the
 HTML instead. We use the API.
 
 Docs: https://webapi.legistar.com/Help
@@ -16,11 +16,24 @@ from typing import Any
 
 import httpx
 
-from convene.models import Event, EventItem, Organization, Person, Source
+from convene.models import (
+    Event,
+    EventItem,
+    Matter,
+    Organization,
+    Person,
+    Source,
+    Vote,
+    VoteOption,
+)
 from convene.registry import Jurisdiction
 
 BASE = "https://webapi.legistar.com/v1"
 PAGE = 1000  # API caps page size at 1000
+
+
+class LegistarError(RuntimeError):
+    """Wraps an httpx error with a more helpful message."""
 
 
 class LegistarAdapter:
@@ -30,6 +43,10 @@ class LegistarAdapter:
             raise ValueError(f"{jurisdiction.slug} is not a Legistar jurisdiction")
         self.j = jurisdiction
         self.token = token
+        if jurisdiction.needs_token and not token:
+            # We let it through so the user can still hit unauthenticated endpoints
+            # if any happen to work, but the next 4xx will explain.
+            pass
         self._http = client or httpx.Client(timeout=30, headers={"Accept": "application/json"})
         self._owns_client = client is None
 
@@ -46,13 +63,19 @@ class LegistarAdapter:
     # ------------------------------------------------------------------ events
 
     def events(self, *, since: date | None = None, until: date | None = None,
-               include_items: bool = False) -> Iterator[Event]:
+               include_items: bool = False, include_votes: bool = False) -> Iterator[Event]:
         """Yield meetings, newest first.
 
-        If `include_items` is True, fetch each event's agenda items individually
-        (one extra request per event). The bulk events endpoint returns empty
-        EventItems lists, so this is the only way to get them.
+        `include_items` triggers one extra request per event (the bulk events
+        endpoint returns empty EventItems lists, so this is the only way to get
+        them). `include_votes` further triggers one request per agenda item, so
+        save it for when you actually need vote-level detail.
         """
+        if "events" in self.j.skip_endpoints:
+            raise LegistarError(
+                f"{self.j.slug} doesn't expose /events through the Legistar API "
+                f"({self.j.note or 'no further detail'})"
+            )
         filters = []
         if since:
             filters.append(f"EventDate ge datetime'{since.isoformat()}'")
@@ -65,13 +88,20 @@ class LegistarAdapter:
         for raw in self._paginate("events", params):
             event = self._event_from_raw(raw)
             if include_items:
-                event.items = list(self._event_items(raw["EventId"]))
+                event.items = list(self._event_items(raw["EventId"], include_votes=include_votes))
             yield event
 
-    def _event_items(self, event_id: int) -> Iterator[EventItem]:
+    def _event_items(self, event_id: int, *, include_votes: bool) -> Iterator[EventItem]:
         url = f"{BASE}/{self.j.client}/events/{event_id}/eventitems"
         raw_items = self._get(url, {})
         for raw in sorted(raw_items, key=lambda r: r.get("EventItemAgendaSequence") or 0):
+            votes: list[Vote] = []
+            # EventItemRollCallFlag is unreliable across cities (Seattle sets it
+            # to 0 even on items that have 5+ votes). When the caller asked for
+            # votes, just ask the API; the empty list is the answer for items
+            # without a roll call.
+            if include_votes:
+                votes = list(self._item_votes(raw["EventItemId"]))
             yield EventItem(
                 order=raw.get("EventItemAgendaSequence") or 0,
                 title=raw.get("EventItemTitle") or raw.get("EventItemActionText") or "",
@@ -79,6 +109,17 @@ class LegistarAdapter:
                 matter_title=raw.get("EventItemMatterName"),
                 matter_type=raw.get("EventItemMatterType"),
                 matter_status=raw.get("EventItemMatterStatus"),
+                votes=votes,
+            )
+
+    def _item_votes(self, event_item_id: int) -> Iterator[Vote]:
+        url = f"{BASE}/{self.j.client}/eventitems/{event_item_id}/votes"
+        for raw in sorted(self._get(url, {}), key=lambda r: r.get("VoteSort") or 0):
+            raw_value = raw.get("VoteValueName") or ""
+            yield Vote(
+                person_name=raw.get("VotePersonName") or "",
+                option=_normalize_vote(raw_value),
+                raw_value=raw_value or None,
             )
 
     def _event_from_raw(self, raw: dict[str, Any]) -> Event:
@@ -122,10 +163,57 @@ class LegistarAdapter:
                 name=raw.get("PersonFullName") or raw.get("PersonLastName") or "",
                 given_name=raw.get("PersonFirstName"),
                 family_name=raw.get("PersonLastName"),
-                email=raw.get("PersonEmail"),
-                image=raw.get("PersonWWW"),
+                email=raw.get("PersonEmail") or None,
+                image=raw.get("PersonWWW") or None,
                 sources=[Source(url=self.j.portal_url)],
             )
+
+    # ----------------------------------------------------------------- matters
+
+    def matters(self, *, since: date | None = None, until: date | None = None,
+                include_sponsors: bool = False) -> Iterator[Matter]:
+        """Yield legislation items (bills, resolutions, etc.).
+
+        `since` / `until` filter on MatterIntroDate. `include_sponsors` does one
+        extra request per matter to pull the sponsor list.
+        """
+        filters = []
+        if since:
+            filters.append(f"MatterIntroDate ge datetime'{since.isoformat()}'")
+        if until:
+            filters.append(f"MatterIntroDate le datetime'{until.isoformat()}'")
+        params = {"$orderby": "MatterIntroDate desc"}
+        if filters:
+            params["$filter"] = " and ".join(filters)
+
+        for raw in self._paginate("matters", params):
+            sponsors: list[str] = []
+            if include_sponsors:
+                sponsors = list(self._matter_sponsors(raw["MatterId"]))
+            yield self._matter_from_raw(raw, sponsors)
+
+    def _matter_sponsors(self, matter_id: int) -> Iterator[str]:
+        url = f"{BASE}/{self.j.client}/matters/{matter_id}/sponsors"
+        raw_sponsors = sorted(self._get(url, {}), key=lambda r: r.get("MatterSponsorSequence") or 0)
+        for raw in raw_sponsors:
+            name = raw.get("MatterSponsorName")
+            if name:
+                yield name
+
+    def _matter_from_raw(self, raw: dict[str, Any], sponsors: list[str]) -> Matter:
+        intro = raw.get("MatterIntroDate")
+        intro_date = _parse_date(intro) if intro else None
+        return Matter(
+            id=f"ocd-bill/{self.j.client}-{raw['MatterId']}",
+            jurisdiction=self.j.slug,
+            identifier=raw.get("MatterFile") or str(raw["MatterId"]),
+            title=(raw.get("MatterTitle") or raw.get("MatterName") or "").strip(),
+            classification=raw.get("MatterTypeName"),
+            status=raw.get("MatterStatusName"),
+            introduced_date=intro_date,
+            sponsors=sponsors,
+            sources=[Source(url=self.j.portal_url)],
+        )
 
     # --------------------------------------------------------------- internals
 
@@ -145,7 +233,25 @@ class LegistarAdapter:
     def _get(self, url: str, params: dict[str, str]) -> list[dict[str, Any]]:
         if self.token:
             params = {**params, "token": self.token}
-        resp = self._http.get(url, params=params)
+        try:
+            resp = self._http.get(url, params=params)
+        except httpx.RequestError as exc:
+            raise LegistarError(f"network error talking to Legistar: {exc}") from exc
+        if resp.status_code == 401 or resp.status_code == 403:
+            hint = (" Pass --token (or set CONVENE_TOKEN)."
+                    if self.j.needs_token and not self.token else "")
+            raise LegistarError(
+                f"{self.j.slug} returned {resp.status_code} on {url}.{hint}"
+            )
+        if resp.status_code >= 500:
+            raise LegistarError(
+                f"{self.j.slug} returned {resp.status_code} on {url}. "
+                f"This usually means Legistar's per-tenant config is incomplete."
+            )
+        if resp.status_code == 400:
+            # Legistar 400s carry useful body text (e.g. "Status Not Vievable...")
+            body = resp.text.strip().strip('"')
+            raise LegistarError(f"{self.j.slug} returned 400: {body}")
         resp.raise_for_status()
         data = resp.json()
         # /events returns a list, but a 404'd resource sometimes returns an empty obj
@@ -163,7 +269,6 @@ def _parse_meeting_start(event_date: str | None, event_time: str | None) -> date
     We try to combine them; if EventTime is weird, fall back to the bare date.
     """
     if not event_date:
-        # the API shouldn't hand us this but a None here would crash pydantic
         raise ValueError("event missing EventDate")
     base = datetime.fromisoformat(event_date)
     if not event_time:
@@ -177,8 +282,11 @@ def _parse_meeting_start(event_date: str | None, event_time: str | None) -> date
     return base
 
 
+def _parse_date(raw: str) -> date:
+    return datetime.fromisoformat(raw).date()
+
+
 def _event_status(raw: dict[str, Any]) -> str | None:
-    # Legistar doesn't expose a clean status. We infer from agenda/minutes state.
     minutes = raw.get("EventMinutesStatusName")
     agenda = raw.get("EventAgendaStatusName")
     if minutes == "Final":
@@ -199,3 +307,22 @@ def _body_classification(body_type: str | None) -> str | None:
     if "department" in t or "office" in t:
         return "department"
     return None
+
+
+_YES_VALUES = {"yes", "yea", "aye", "in favor", "for"}
+_NO_VALUES = {"no", "nay", "against", "opposed"}
+_ABSENT_VALUES = {"absent", "excused", "not present", "non voting"}
+_ABSTAIN_VALUES = {"abstain", "abstention", "abstaining", "present"}
+
+
+def _normalize_vote(value: str) -> VoteOption:
+    v = value.strip().lower()
+    if v in _YES_VALUES:
+        return "yes"
+    if v in _NO_VALUES:
+        return "no"
+    if v in _ABSTAIN_VALUES:
+        return "abstain"
+    if v in _ABSENT_VALUES:
+        return "absent"
+    return "other"

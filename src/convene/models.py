@@ -47,9 +47,13 @@ class Person(BaseModel):
     sources: list[Source] = Field(default_factory=list)
 
 
+VoteOption = Literal["yes", "no", "abstain", "absent", "other"]
+
+
 class Vote(BaseModel):
     person_name: str
-    option: Literal["yes", "no", "abstain", "absent", "other"]
+    option: VoteOption
+    raw_value: str | None = None  # the platform's verbatim label, e.g. "In Favor", "Excused"
 
 
 class EventItem(BaseModel):
