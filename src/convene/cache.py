@@ -35,13 +35,18 @@ class CachingTransport(httpx.BaseTransport):
             return self.inner.handle_request(request)
         cache_path = self._path_for(request)
         if cache_path.exists():
-            payload = json.loads(cache_path.read_text())
-            return httpx.Response(
-                status_code=payload["status"],
-                headers=payload["headers"],
-                content=payload["body"].encode("utf-8"),
-                request=request,
-            )
+            try:
+                payload = json.loads(cache_path.read_text())
+                return httpx.Response(
+                    status_code=payload["status"],
+                    headers=payload["headers"],
+                    content=payload["body"].encode("utf-8"),
+                    request=request,
+                )
+            except (json.JSONDecodeError, KeyError):
+                # Partial write from a previous crash, or schema changed
+                # between versions. Drop the bad entry and refetch.
+                cache_path.unlink(missing_ok=True)
         resp = self.inner.handle_request(request)
         if 200 <= resp.status_code < 300:
             body = resp.read().decode("utf-8")

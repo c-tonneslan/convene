@@ -70,3 +70,21 @@ def test_cache_passes_through_non_get(tmp_path: Path):
     client.post("https://example.com/foo")
     client.post("https://example.com/foo")
     assert posts[0] == 2  # not cached
+
+
+def test_cache_recovers_from_corrupt_entry(tmp_path: Path):
+    inner, calls = _counted_inner([{"k": "v"}])
+    cache = CachingTransport(tmp_path, inner=inner)
+    client = httpx.Client(transport=cache)
+
+    # First request writes a cache file.
+    client.get("https://example.com/foo")
+    cached = next(tmp_path.rglob("*.json"))
+    # Simulate a partial write from a previous crash.
+    cached.write_text("{not valid json")
+
+    # Subsequent request should drop the bad entry and refetch
+    # instead of crashing with a JSONDecodeError.
+    r = client.get("https://example.com/foo")
+    assert r.json() == {"k": "v"}
+    assert calls[0] == 2
