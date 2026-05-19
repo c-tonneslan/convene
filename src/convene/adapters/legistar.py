@@ -10,8 +10,10 @@ Docs: https://webapi.legistar.com/Help
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from datetime import date, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -32,6 +34,8 @@ from convene.registry import Jurisdiction
 
 BASE = "https://webapi.legistar.com/v1"
 PAGE = 1000  # API caps page size at 1000
+MAX_RETRIES = 3
+RETRY_BASE = 0.5  # seconds; doubled on each subsequent attempt
 
 
 class LegistarError(RuntimeError):
@@ -296,10 +300,7 @@ class LegistarAdapter:
     def _get(self, url: str, params: dict[str, str]) -> list[dict[str, Any]]:
         if self.token:
             params = {**params, "token": self.token}
-        try:
-            resp = self._http.get(url, params=params)
-        except httpx.RequestError as exc:
-            raise LegistarError(f"network error talking to Legistar: {exc}") from exc
+        resp = self._request_with_retry(url, params)
         if resp.status_code == 401 or resp.status_code == 403:
             hint = (" Pass --token (or set CONVENE_TOKEN)."
                     if self.j.needs_token and not self.token else "")
@@ -319,6 +320,34 @@ class LegistarAdapter:
         data = resp.json()
         # /events returns a list, but a 404'd resource sometimes returns an empty obj
         return data if isinstance(data, list) else []
+
+    def _request_with_retry(self, url: str, params: dict[str, str]) -> httpx.Response:
+        """Send the request, retrying on transient failures.
+
+        Legistar rate-limits and occasionally 502s under load. The 5xx
+        path above still translates a final 5xx into a config-error
+        message, but most of those are actually transient — a short
+        retry catches them before the user sees a misleading error.
+        """
+        last_exc: httpx.RequestError | None = None
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                resp = self._http.get(url, params=params)
+            except httpx.RequestError as exc:
+                last_exc = exc
+                if attempt >= MAX_RETRIES:
+                    raise LegistarError(
+                        f"network error talking to Legistar: {exc}"
+                    ) from exc
+                time.sleep(RETRY_BASE * (2**attempt))
+                continue
+            if attempt < MAX_RETRIES and _is_retryable(resp.status_code):
+                time.sleep(_retry_delay(resp, attempt))
+                continue
+            return resp
+        # Unreachable: the loop either returns a response or raises above.
+        assert last_exc is None
+        raise LegistarError("legistar retry loop exhausted without a response")
 
 
 # ----------------------------------------------------------------- helpers
@@ -400,3 +429,30 @@ def _normalize_vote(value: str) -> VoteOption:
     if v in _ABSENT_VALUES:
         return "absent"
     return "other"
+
+
+def _is_retryable(status: int) -> bool:
+    return status == 429 or 500 <= status <= 599
+
+
+def _retry_delay(resp: httpx.Response, attempt: int) -> float:
+    """Pick the wait time before the next retry.
+
+    Prefers the server's Retry-After hint (either an integer number of
+    seconds or an HTTP-date per RFC 7231 §7.1.3), falling back to
+    exponential backoff from RETRY_BASE.
+    """
+    hint = resp.headers.get("Retry-After")
+    if hint:
+        hint = hint.strip()
+        if hint.isdigit():
+            return float(hint)
+        try:
+            target = parsedate_to_datetime(hint)
+        except (TypeError, ValueError):
+            target = None
+        if target is not None:
+            delta = (target - datetime.now(target.tzinfo)).total_seconds()
+            if delta > 0:
+                return delta
+    return RETRY_BASE * (2**attempt)

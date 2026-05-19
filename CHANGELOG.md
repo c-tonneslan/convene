@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Legistar adapter retries on 429 and 5xx with exponential backoff (3
+  attempts by default, honors `Retry-After`). Network errors during the
+  request are also retried. Daily-snapshot workflows that hit Legistar
+  during peak hours stop failing on the first transient hiccup.
+
 ## 0.4.0 — 2026-05-17
 
 Docs, distribution, automation.
