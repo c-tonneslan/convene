@@ -83,6 +83,16 @@ the output as it lands:
 $ convene matters philly --since 2026-01-01 --format ndjson | jq -r '.identifier'
 ```
 
+Export upcoming meetings as an iCalendar feed and drop it into any calendar
+app:
+
+```
+$ convene events philly --since 2026-01-01 --format ics -o philly.ics
+```
+
+Each meeting becomes a `VEVENT` with the start time, location, status, and a
+link to the agenda. `--format ics` applies to `convene events` only.
+
 Cache GET responses across runs (useful when iterating):
 
 ```

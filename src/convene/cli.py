@@ -31,6 +31,8 @@ from convene.adapters import GranicusAdapter, LegistarAdapter
 from convene.adapters.granicus import GranicusError
 from convene.adapters.legistar import LegistarError
 from convene.cache import build_client
+from convene.ical import to_ics
+from convene.models import Event
 from convene.registry import Jurisdiction, jurisdictions
 from convene.registry import get as get_jurisdiction
 
@@ -64,7 +66,8 @@ def _output_opt():
 
 def _format_opt():
     return typer.Option("json", "--format", "-f",
-                        help="Output format: 'json' or 'ndjson' (one record per line)")
+                        help="Output format: 'json', 'ndjson', or 'ics' "
+                             "(iCalendar, events only)")
 
 
 def _cache_opt():
@@ -268,14 +271,23 @@ def _emit(records: Iterable, output: Path | None, fmt: str,
                 # If they only asked for SQLite, don't dump JSON too.
                 return
 
-        if fmt not in {"json", "ndjson"}:
-            err.print(f"[red]unknown --format {fmt!r}; use 'json' or 'ndjson'[/red]")
+        if fmt not in {"json", "ndjson", "ics"}:
+            err.print(f"[red]unknown --format {fmt!r}; use 'json', 'ndjson', or 'ics'[/red]")
             raise typer.Exit(code=2)
 
-        out = output.open("w") if output else sys.stdout
+        if fmt == "ics":
+            records = list(records)
+            if any(not isinstance(r, Event) for r in records):
+                err.print("[red]--format ics is only supported for `convene events`[/red]")
+                raise typer.Exit(code=2)
+
+        out = output.open("w", newline="") if output else sys.stdout
         try:
             count = 0
-            if fmt == "ndjson":
+            if fmt == "ics":
+                out.write(to_ics(records))
+                count = len(records)
+            elif fmt == "ndjson":
                 for r in records:
                     out.write(r.model_dump_json() + "\n")
                     count += 1
