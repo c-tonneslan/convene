@@ -139,7 +139,8 @@ def cmd_events(
                 since=since.date() if since else None,
                 until=until.date() if until else None,
             )
-            _emit(_limit(events, limit), output, fmt, db, sqlite_sink.insert_events)
+            _emit(_limit(events, limit), output, fmt, db, sqlite_sink.insert_events,
+                  cal_name=f"{j.name} meetings")
         return
 
     with LegistarAdapter(j, token=token, client=build_client(cache=cache)) as adapter:
@@ -258,7 +259,7 @@ def _limit(it: Iterable, n: int | None) -> Iterable:
 
 
 def _emit(records: Iterable, output: Path | None, fmt: str,
-          db: Path | None, db_inserter) -> None:
+          db: Path | None, db_inserter, cal_name: str | None = None) -> None:
     """Tee records to one or more sinks (stdout/file as JSON, and/or SQLite)."""
     try:
         if db:
@@ -285,7 +286,7 @@ def _emit(records: Iterable, output: Path | None, fmt: str,
         try:
             count = 0
             if fmt == "ics":
-                out.write(to_ics(records))
+                out.write(to_ics(records, name=cal_name))
                 count = len(records)
             elif fmt == "ndjson":
                 for r in records:

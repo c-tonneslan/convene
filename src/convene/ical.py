@@ -21,14 +21,21 @@ _STATUS = {
 }
 
 
-def to_ics(events: Iterable[Event]) -> str:
-    """Render events as a VCALENDAR string with RFC 5545 CRLF line endings."""
+def to_ics(events: Iterable[Event], *, name: str | None = None) -> str:
+    """Render events as a VCALENDAR string with RFC 5545 CRLF line endings.
+
+    When ``name`` is given it's emitted as X-WR-CALNAME, the property
+    Apple Calendar, Google Calendar and Outlook read to label a
+    subscribed feed. Without it the feed shows up untitled.
+    """
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         f"PRODID:{_PRODID}",
         "CALSCALE:GREGORIAN",
     ]
+    if name:
+        lines.append(f"X-WR-CALNAME:{_escape(name)}")
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     for event in events:
         lines.extend(_vevent(event, stamp))

@@ -66,6 +66,16 @@ def test_url_falls_back_to_the_first_source():
     assert "URL:https://example.gov/m/1\r\n" in out
 
 
+def test_calendar_name_becomes_x_wr_calname():
+    # The comma also exercises RFC 5545 escaping on the calendar name.
+    out = to_ics([_event()], name="New York, NY meetings")
+    assert "X-WR-CALNAME:New York\\, NY meetings\r\n" in out
+
+
+def test_calendar_name_is_omitted_by_default():
+    assert "X-WR-CALNAME" not in to_ics([_event()])
+
+
 def test_long_lines_are_folded_to_75_octets():
     out = to_ics([_event(name="A " + "very " * 40 + "long meeting name")])
     for line in out.split("\r\n"):
