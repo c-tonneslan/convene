@@ -326,15 +326,13 @@ class LegistarAdapter:
 
         Legistar rate-limits and occasionally 502s under load. The 5xx
         path above still translates a final 5xx into a config-error
-        message, but most of those are actually transient — a short
+        message, but most of those are actually transient, a short
         retry catches them before the user sees a misleading error.
         """
-        last_exc: httpx.RequestError | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
                 resp = self._http.get(url, params=params)
             except httpx.RequestError as exc:
-                last_exc = exc
                 if attempt >= MAX_RETRIES:
                     raise LegistarError(
                         f"network error talking to Legistar: {exc}"
@@ -345,8 +343,8 @@ class LegistarAdapter:
                 time.sleep(_retry_delay(resp, attempt))
                 continue
             return resp
-        # Unreachable: the loop either returns a response or raises above.
-        assert last_exc is None
+        # range(MAX_RETRIES + 1) always either returns or raises above; the
+        # type checker doesn't see that, so close out with a clear error.
         raise LegistarError("legistar retry loop exhausted without a response")
 
 
